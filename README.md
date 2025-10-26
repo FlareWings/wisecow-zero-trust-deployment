@@ -1,69 +1,44 @@
-# EKS Deployment and CI/CD for the "Wisecow" Application
+### Phase 2: A Deep Dive into Zero-Trust Runtime Security
 
-**Live Deployment:** [https://wisecow-on-kubernetes.online](https://wisecow-on-kubernetes.online)
+The final phase of this project was dedicated to implementing a zero-trust runtime security policy using KubeArmor. What began as a straightforward task evolved into a deep, multi-layered diagnostic investigation that tested the limits of my troubleshooting skills and ultimately provided a more profound understanding of real-world security engineering.
 
-## 1. Project Objective
+#### The Goal
+My objective was to create a strict security policy for the `wisecow` workload that would block any unauthorized behavior, starting with a simple attempt to read a sensitive file like `/etc/passwd`.
 
-This repository contains the artifacts for the containerization, continuous integration, continuous deployment (CI/CD), and operational management of a web application on Amazon Elastic Kubernetes Service (EKS). The primary goal is to demonstrate a production-grade workflow, from source code to a secure, scalable, and highly available public-facing service.
+#### The Initial Challenge: Unraveling the "It Doesn't Work"
+My first attempt involved applying a policy on my local Minikube environment. Despite the policy being syntactically correct, it failed to generate any alerts. This began an intensive troubleshooting journey to uncover the root cause.
 
-The implementation covers four main phases:
-*   **Phase 1: Containerization:** Encapsulating the application using Docker.
-*   **Phase 2: Cloud-Native CI/CD:** Automating the build and deployment process with GitHub Actions and Amazon ECR.
-*   **Phase 3: Infrastructure Management:** Provisioning and performing a zero-downtime version upgrade of an Amazon EKS cluster.
-*   **Phase 4: Secure Public Access:** Configuring TLS termination using an Application Load Balancer (ALB) managed by the AWS Load Balancer Controller.
+1.  **First Clue: The Missing Enforcer.** The first breakthrough came from inspecting the KubeArmor agent's logs. I discovered a critical warning:
+    > `INFO Disabled KubeArmor Enforcer since No LSM is enabled`
+    This confirmed my local Minikube kernel lacked the necessary Linux Security Modules (LSMs) for enforcement, forcing KubeArmor into a degraded, audit-only mode.
 
-## 2. Technical Implementation and Challenges
+2.  **Second Clue: A Broken Communication Bridge.** Even in audit mode, no logs were appearing. This led me to investigate the communication flow. By checking the logs of the `kubearmor-relay` pod, I found it was failing to connect to the agent, indicating an internal cluster networking issue.
+    > `...connection error: desc = "transport: Error while dialing: ... connect: connection refused"`
 
-This section details the technical decisions and challenges encountered during the project execution, along with the implemented solutions.
+3.  **The Root Cause: A Faulty Foundation.** Bypassing the relay and streaming logs directly from the KubeArmor agent pod revealed the final, definitive root cause. The agent itself was failing to initialize its monitoring engine because it could not connect to the Docker runtime socket.
+    > `ERROR Failed to create new Docker client: ... malformed HTTP response`
 
-### 2.1. CI/CD Pipeline Architecture
-**Initial State:** The initial CI/CD pipeline was configured for deployment to a local `minikube` cluster, which is unsuitable for a cloud-based continuous deployment model due to network isolation.
+This discovery was crucial. It proved that the issue was not with my policy or my commands, but a fundamental environmental incompatibility between KubeArmor and the specific Docker runtime configuration within my local Minikube setup.
 
-**Implemented Solution:** The pipeline was re-architected for a cloud-native environment.
-*   **Container Registry:** Migrated from Docker Hub to **Amazon Elastic Container Registry (ECR)** for private, secure image storage.
-*   **Authentication:** Replaced static Docker credentials with secure, short-lived tokens using the **AWS IAM** `configure-aws-credentials` and `amazon-ecr-login` GitHub Actions.
-*   **Deployment Target:** Modified the deployment job to connect to the public API endpoint of the Amazon EKS cluster, enabling successful deployments from the GitHub Actions runner.
+#### The Strategic Pivot: From Local Lab to Live Environment
 
-### 2.2. EKS Cluster Lifecycle Management
-**Challenge:** An end-of-support notification was issued by AWS for the cluster's Kubernetes version (v1.28), necessitating a controlled, in-place upgrade.
+With the local environment proven unsuitable for enforcement, I made the strategic decision to pivot. I transitioned the test to the production-like **Amazon EKS cluster**, which runs on an OS with the necessary LSM capabilities.
 
-**Implemented Solution:** A zero-downtime "blue/green" node group migration was executed.
-1.  **Control Plane Upgrade:** The EKS control plane was upgraded sequentially from v1.28 to v1.30 using `eksctl upgrade cluster`.
-2.  **New Node Group Provisioning:** A new EKS Managed Node Group was provisioned with a version matching the upgraded control plane.
-3.  **Workload Migration:** The `kubectl drain` command was used to gracefully evict all pods from the old node group. The Kubernetes scheduler automatically rescheduled these pods onto the new, healthy nodes, ensuring service continuity. This included both the application pods and critical system components like `coredns` and the `aws-load-balancer-controller`.
-4.  **Decommissioning:** The old node group was deleted using `eksctl delete nodegroup` after workload migration was verified.
+I crafted a new policy, this time with a definitive `action: Block`, and applied it to the live `wisecow` deployment.
 
-### 2.3. TLS Termination and Ingress
-**Challenge:** The application required secure HTTPS access from the public internet. This necessitated integration with a DNS provider, certificate authority, and an L7 load balancer.
+#### The Final Success: Definitive Enforcement
 
-**Implemented Solution:**
-1.  **Domain and DNS:** An external domain was registered with **Namecheap**. DNS authority was then delegated to **AWS Route 53** by creating a Public Hosted Zone and updating the nameserver (NS) records at the registrar. This centralized DNS management within the AWS ecosystem.
-2.  **Certificate Provisioning:** A public TLS certificate for the domain was requested from **AWS Certificate Manager (ACM)** and validated using the DNS validation method. The tight integration between Route 53 and ACM allowed for automated creation of the validation CNAME record.
-3.  **Load Balancer and Ingress Configuration:**
-    *   The **AWS Load Balancer Controller** was installed in the cluster using its official Helm chart.
-    *   A Kubernetes `Ingress` resource was defined using `spec.ingressClassName: alb`.
-    *   The Ingress was annotated with the ACM certificate's ARN and a rule to automatically redirect all HTTP traffic to HTTPS, which provisioned and configured an AWS Application Load Balancer accordingly.
-    *   A final **Alias (A) record** was created in Route 53 to point the custom domain to the DNS name of the provisioned ALB.
+The result was immediate and conclusive.
 
-## 3. Technology Stack
+*   The attempt to read `/etc/passwd` from within the container was instantly met with a **`Permission denied`** error.
+*   Simultaneously, the KubeArmor log stream captured a JSON alert confirming the action was successfully **`Blocked`**.
 
-| Domain | Technology / Service | Role |
-| :--- | :--- | :--- |
-| **Orchestration** | Amazon EKS (v1.30) | Managed Kubernetes control plane and data plane. |
-| **Containerization** | Docker | Application packaging and runtime environment. |
-| **CI/CD** | GitHub Actions | Automated build, test, and deployment workflow. |
-| **Container Registry**| Amazon ECR | Private, secure storage for Docker images. |
-| **DNS & Domain** | Namecheap & AWS Route 53 | Domain registration and authoritative DNS hosting. |
-| **Security & TLS** | AWS Certificate Manager (ACM) | Provisioning and management of public SSL/TLS certificates. |
-| **Load Balancing** | AWS Load Balancer Controller | L7 Ingress management and ALB provisioning. |
-| **CLI Tooling** | `kubectl` & `eksctl` | Kubernetes cluster and AWS EKS resource interaction. |
+This successful test was the culmination of hours of persistent debugging. The journey from a non-functional local test to a successful block in a live cloud environment was an invaluable learning experience, far exceeding the original scope of the problem statement.
 
-## 4. Repository Contents
+#### Proof of Enforcement
 
-This repository includes:
-*   `Dockerfile`: Defines the build process for the application container image.
-*   `.github/workflows/cicd-pipeline.yaml`: The GitHub Actions workflow for the CI/CD pipeline.
-*   `deployment.yaml`: Kubernetes manifest for the application `Deployment`.
-*   `service.yaml`: Kubernetes manifest for the application `Service`.
-*   `ingress.yaml`: Kubernetes manifest for the `Ingress` resource to manage external access.
+The following screenshot captures the final, successful test. The right terminal shows the "Permission denied" error upon attempting to access the file, and the left terminal shows the corresponding "Block" alert from KubeArmor, validating that the zero-trust policy was fully enforced.
 
+![KubeArmor Enforcement in Action](images/snapshot.png)
+
+This experience was a powerful lesson in the realities of DevOps and security engineering: tools are only as effective as the environment they run in, and the ability to diagnose issues across complex, layered systems is a critical skill.

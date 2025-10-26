@@ -1,0 +1,20 @@
+apiVersion: security.kubearmor.com/v1
+kind: KubeArmorPolicy
+metadata:
+  name: wisecow-block-sensitive-read-eks
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: wisecow
+
+  # The file operation to block
+  file:
+    matchPaths:
+    - path: /etc/passwd
+
+  # The enforcement action
+  action: Block
+
+  # A clear message for our success log
+  message: "KubeArmor ENFORCEMENT: Unauthorized read of /etc/passwd was blocked."
